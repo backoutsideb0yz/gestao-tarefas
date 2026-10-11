@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # dependencies
 node_modules
 .pnp
@@ -38,3 +39,10 @@ yarn-error.log*
 
 # vercel
 .vercel
+=======
+node_modules
+# Keep environment variables out of version control
+.env
+
+/generated/prisma
+>>>>>>> 5b00b42efb8ceb9ff57e36e65c67bed76f65ca15
