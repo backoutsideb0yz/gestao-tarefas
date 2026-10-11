@@ -16,3 +16,10 @@ export type Task = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type TaskFormValues = {
+  title: string;
+  description: string;
+  priority: Priority;
+  dueDate: string;
+}

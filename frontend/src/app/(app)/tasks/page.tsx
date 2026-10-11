@@ -1,231 +1,202 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
+import { ClipboardList, Loader2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import type { Task, User } from "@/types";
+import { toCreatePayload, toUpdatePayload } from "@/lib/utils";
+import type { Priority, Task, TaskFormValues } from "@/types";
+import { TaskStats } from "@/components/task-stats";
+import { TaskForm } from "@/components/task-form";
+import {
+  TaskFilters,
+  type PriorityFilter,
+  type SortBy,
+  type StatusFilter,
+} from "@/components/task-filters";
+import { TaskItem } from "@/components/task-item";
+import { EditTaskModal } from "@/components/edit-task-modal";
+import { ConfirmDialog } from "@/components/confirm-dialog";
+
+const priorityOrder: Record<Priority, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+
+function errorMessage(err: unknown, fallback: string) {
+  if (err instanceof ApiError) {
+    const fieldMessages = err.errors ? Object.values(err.errors).flat() : [];
+    return fieldMessages[0] ?? err.message;
+  }
+  return fallback;
+}
 
 export default function TasksPage() {
-  const router = useRouter();
-
-  const [user, setUser] = useState<User | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
 
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<StatusFilter>("all");
+  const [priority, setPriority] = useState<PriorityFilter>("all");
+  const [sortBy, setSortBy] = useState<SortBy>("recent");
 
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editTitle, setEditTitle] = useState("");
-
-  function logout() {
-    localStorage.removeItem("token");
-    router.replace("/login");
-  }
+  const [editing, setEditing] = useState<Task | null>(null);
+  const [deleting, setDeleting] = useState<Task | null>(null);
 
   useEffect(() => {
     async function load() {
       try {
-        const me = await api<User>("/auth/me");
-        const list = await api<Task[]>("/tasks");
-        setUser(me);
-        setTasks(list);
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 401) {
-          localStorage.removeItem("token");
-          router.replace("/login");
-          return;
-        }
-        setError("Não foi possível carregar suas tarefas");
+        setTasks(await api<Task[]>("/tasks"));
+      } catch {
+        toast.error("Não foi possível carregar as tarefas");
       } finally {
         setLoading(false);
       }
     }
-
     load();
-  }, [router]);
+  }, []);
 
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    setError("");
+  const visibleTasks = useMemo(() => {
+    const term = search.trim().toLowerCase();
 
+    const filtered = tasks.filter((t) => {
+      if (status === "pending" && t.done) return false;
+      if (status === "done" && !t.done) return false;
+      if (priority !== "all" && t.priority !== priority) return false;
+      if (
+        term &&
+        !t.title.toLowerCase().includes(term) &&
+        !(t.description ?? "").toLowerCase().includes(term)
+      )
+        return false;
+      return true;
+    });
+
+    return [...filtered].sort((a, b) => {
+      if (sortBy === "priority") return priorityOrder[a.priority] - priorityOrder[b.priority];
+      if (sortBy === "due") {
+        if (!a.dueDate && !b.dueDate) return 0;
+        if (!a.dueDate) return 1;
+        if (!b.dueDate) return -1;
+        return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+      }
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+  }, [tasks, search, status, priority, sortBy]);
+
+  async function handleCreate(values: TaskFormValues) {
     try {
       const created = await api<Task>("/tasks", {
         method: "POST",
-        body: JSON.stringify({
-          title,
-          ...(description.trim() ? { description } : {}),
-        }),
+        body: JSON.stringify(toCreatePayload(values)),
       });
       setTasks((prev) => [created, ...prev]);
-      setTitle("");
-      setDescription("");
+      toast.success("Tarefa criada");
     } catch (err) {
-      if (err instanceof ApiError) {
-        const fieldMessages = err.errors ? Object.values(err.errors).flat() : [];
-        setError(fieldMessages[0] ?? err.message);
-      } else {
-        setError("Erro ao criar tarefa");
-      }
+      toast.error(errorMessage(err, "Erro ao criar tarefa"));
+      throw err; // avisa o formulário para não limpar os campos
     }
   }
 
-  async function toggleDone(task: Task) {
+  async function handleToggle(task: Task) {
     try {
       const updated = await api<Task>(`/tasks/${task.id}`, {
         method: "PATCH",
         body: JSON.stringify({ done: !task.done }),
       });
       setTasks((prev) => prev.map((t) => (t.id === task.id ? updated : t)));
-    } catch {
-      setError("Erro ao atualizar tarefa");
-    }
-  }
-
-  async function saveEdit(task: Task) {
-    try {
-      const updated = await api<Task>(`/tasks/${task.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ title: editTitle }),
-      });
-      setTasks((prev) => prev.map((t) => (t.id === task.id ? updated : t)));
-      setEditingId(null);
     } catch (err) {
-      if (err instanceof ApiError) {
-        const fieldMessages = err.errors ? Object.values(err.errors).flat() : [];
-        setError(fieldMessages[0] ?? err.message);
-      } else {
-        setError("Erro ao editar tarefa");
-      }
+      toast.error(errorMessage(err, "Erro ao atualizar tarefa"));
     }
   }
 
-  async function handleDelete(id: string) {
+  async function handleSave(id: string, values: TaskFormValues) {
+    try {
+      const updated = await api<Task>(`/tasks/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(toUpdatePayload(values)),
+      });
+      setTasks((prev) => prev.map((t) => (t.id === id ? updated : t)));
+      toast.success("Tarefa atualizada");
+    } catch (err) {
+      toast.error(errorMessage(err, "Erro ao editar tarefa"));
+      throw err; // mantém o modal aberto
+    }
+  }
+
+  async function confirmDelete() {
+    if (!deleting) return;
+    const id = deleting.id;
+    setDeleting(null);
+
     try {
       await api(`/tasks/${id}`, { method: "DELETE" });
       setTasks((prev) => prev.filter((t) => t.id !== id));
-    } catch {
-      setError("Erro ao excluir tarefa");
+      toast.success("Tarefa excluída");
+    } catch (err) {
+      toast.error(errorMessage(err, "Erro ao excluir tarefa"));
     }
   }
 
   if (loading) {
-    return <main className="p-6">Carregando...</main>;
+    return (
+      <div className="flex justify-center py-20">
+        <Loader2 className="animate-spin text-gray-400" />
+      </div>
+    );
   }
 
   return (
-    <main className="min-h-screen bg-gray-50">
-      <div className="max-w-2xl mx-auto p-6 space-y-6">
-        <header className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">Minhas tarefas</h1>
-            <p className="text-sm text-gray-600">Olá, {user?.name}</p>
-          </div>
-          <button onClick={logout} className="text-sm text-red-600 underline">
-            Sair
-          </button>
-        </header>
+    <div className="space-y-6">
+      <TaskStats tasks={tasks} />
+      <TaskForm onSubmit={handleCreate} />
 
-        <form
-          onSubmit={handleCreate}
-          className="bg-white p-4 rounded-lg shadow space-y-3"
-        >
-          <input
-            className="w-full border rounded p-2"
-            placeholder="Título da tarefa"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-          />
-          <input
-            className="w-full border rounded p-2"
-            placeholder="Descrição (opcional)"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-          <button className="bg-blue-600 text-white rounded px-4 py-2">
-            Adicionar
-          </button>
-        </form>
+      <TaskFilters
+        search={search}
+        status={status}
+        priority={priority}
+        sortBy={sortBy}
+        onSearch={setSearch}
+        onStatus={setStatus}
+        onPriority={setPriority}
+        onSortBy={setSortBy}
+      />
 
-        {error && <p className="text-red-600 text-sm">{error}</p>}
+      {visibleTasks.length === 0 ? (
+        <div className="text-center py-12 text-gray-500">
+          <ClipboardList size={40} className="mx-auto mb-3 text-gray-300" />
+          {tasks.length === 0
+            ? "Nenhuma tarefa ainda. Crie a primeira acima."
+            : "Nenhuma tarefa encontrada com esses filtros."}
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {visibleTasks.map((task) => (
+            <TaskItem
+              key={task.id}
+              task={task}
+              onToggle={handleToggle}
+              onEdit={setEditing}
+              onDelete={setDeleting}
+            />
+          ))}
+        </ul>
+      )}
 
-        {tasks.length === 0 ? (
-          <p className="text-gray-500 text-center">
-            Nenhuma tarefa ainda. Crie a primeira acima.
-          </p>
-        ) : (
-          <ul className="space-y-2">
-            {tasks.map((task) => (
-              <li
-                key={task.id}
-                className="bg-white p-3 rounded-lg shadow flex items-center gap-3"
-              >
-                <input
-                  type="checkbox"
-                  checked={task.done}
-                  onChange={() => toggleDone(task)}
-                />
+      {editing && (
+        <EditTaskModal
+          key={editing.id}
+          task={editing}
+          onClose={() => setEditing(null)}
+          onSave={handleSave}
+        />
+      )}
 
-                <div className="flex-1">
-                  {editingId === task.id ? (
-                    <input
-                      className="w-full border rounded p-1"
-                      value={editTitle}
-                      onChange={(e) => setEditTitle(e.target.value)}
-                      autoFocus
-                    />
-                  ) : (
-                    <>
-                      <p className={task.done ? "line-through text-gray-400" : ""}>
-                        {task.title}
-                      </p>
-                      {task.description && (
-                        <p className="text-sm text-gray-500">{task.description}</p>
-                      )}
-                    </>
-                  )}
-                </div>
-
-                {editingId === task.id ? (
-                  <>
-                    <button
-                      onClick={() => saveEdit(task)}
-                      className="text-sm text-blue-600"
-                    >
-                      Salvar
-                    </button>
-                    <button
-                      onClick={() => setEditingId(null)}
-                      className="text-sm text-gray-500"
-                    >
-                      Cancelar
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      onClick={() => {
-                        setEditingId(task.id);
-                        setEditTitle(task.title);
-                      }}
-                      className="text-sm text-blue-600"
-                    >
-                      Editar
-                    </button>
-                    <button
-                      onClick={() => handleDelete(task.id)}
-                      className="text-sm text-red-600"
-                    >
-                      Excluir
-                    </button>
-                  </>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </main>
+      {deleting && (
+        <ConfirmDialog
+          title="Excluir tarefa?"
+          message={`"${deleting.title}" será excluída permanentemente.`}
+          onConfirm={confirmDelete}
+          onCancel={() => setDeleting(null)}
+        />
+      )}
+    </div>
   );
 }
