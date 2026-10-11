@@ -2,6 +2,12 @@ import { Request, Response } from "express";
 import { prisma } from "../lib/prisma";
 import { createTaskSchema, updateTaskSchema } from "../schemas/task.schema";
 
+function toDate(value: string | null | undefined) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return new Date(value);
+}
+
 export async function createTask(req: Request, res: Response) {
   const parsed = createTaskSchema.safeParse(req.body);
 
@@ -13,9 +19,13 @@ export async function createTask(req: Request, res: Response) {
   }
 
   const task = await prisma.task.create({
-    data: { ...parsed.data, userId: req.userId as string },
-  });
-
+  data: {
+    ...parsed.data,
+    dueDate: toDate(parsed.data.dueDate),
+    userId: req.userId as string,
+  },
+  
+});
   return res.status(201).json(task);
 }
 
@@ -50,7 +60,7 @@ export async function updateTask(req: Request, res: Response) {
 
   const updated = await prisma.task.update({
     where: { id },
-    data: parsed.data,
+    data: { ...parsed.data, dueDate: toDate(parsed.data.dueDate) },
   });
 
   return res.json(updated);
